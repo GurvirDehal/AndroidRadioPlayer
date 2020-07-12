@@ -1,5 +1,7 @@
 package com.example.gurvir.myapplication;
 
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
@@ -12,14 +14,16 @@ import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.TextView;
 
-
-import com.google.android.exoplayer2.SimpleExoPlayer;
+import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
@@ -31,15 +35,15 @@ import androidx.appcompat.app.AppCompatActivity;
 
 public class MainActivity extends AppCompatActivity {
   private final String TAG = "MyApp";
-  MediaExtractor extractor;
+    MediaExtractor extractor;
   MediaCodec codec;
   AudioTrack audioTrack;
-  SimpleExoPlayer player;
   PipedOutputStream pipedOutputStream;
   PipedInputStream pipedInputStream;
   MediaCodec.BufferInfo info;
   ADTSExtractor adtsExtractor;
   TextView txt;
+  ImageView albumArt;
   @Override
   protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
@@ -61,6 +65,7 @@ public class MainActivity extends AppCompatActivity {
     audioTrack.play();
     Button btn = (Button) findViewById(R.id.mainButton);
     txt = (TextView) findViewById(R.id.currentSong);
+    albumArt = (ImageView) findViewById(R.id.albumArt);
     btn.setOnClickListener(new View.OnClickListener() {
       @Override
       public void onClick(View v) {
@@ -69,7 +74,6 @@ public class MainActivity extends AppCompatActivity {
       }
     });
   }
-
   private class LongRunningTask extends AsyncTask<Void, Void, Void> {
     private String icy_title;
     private int icy_meta;
@@ -159,7 +163,7 @@ public class MainActivity extends AppCompatActivity {
       try {
         String ampRadio = "https://newcap.leanstream.co/CKMPFM";
         String virginRadio = "https://18583.live.streamtheworld.com/CIBKFMAAC_SC";
-        URL url = new URL(virginRadio);
+        URL url = new URL(ampRadio);
         HttpURLConnection urlConnection = (HttpURLConnection) url.openConnection();
         urlConnection.setRequestProperty("Icy-Metadata", "1");
         String headerField = urlConnection.getHeaderField("icy-metaint");
@@ -191,6 +195,64 @@ public class MainActivity extends AppCompatActivity {
       } finally {
         return null;
       }
+    }
+    private Bitmap getImageBitmap(String url) {
+      Bitmap bm = null;
+      try {
+        URL aURL = new URL(url);
+        HttpURLConnection conn = (HttpURLConnection) aURL.openConnection();
+        conn.connect();
+        try
+            (
+              AutoCloseable ignored = () -> conn.disconnect();
+              BufferedInputStream bis = new BufferedInputStream(conn.getInputStream());
+            )
+        {
+          bm = BitmapFactory.decodeStream(bis);
+        } finally {
+          conn.disconnect();
+        }
+      } catch (Exception e) {
+        Log.e(TAG, "Error getting bitmap", e);
+      }
+      return bm;
+    }
+    public void getAlbumArt(String str) {
+      Runnable getAlbumArt = new Runnable() {
+        @Override
+        public void run() {
+          try {
+            URL url = new URL("https://itunes.apple.com/search?term=" + str + "&limit=1");
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            try(
+                    AutoCloseable ignored = () -> connection.disconnect();
+                    InputStream stream = connection.getInputStream();
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
+            ) {
+              connection.connect();
+              StringBuffer buffer = new StringBuffer();
+              String line = "";
+              while((line = reader.readLine()) != null) {
+                buffer.append(line+"\n");
+              }
+              String artURL = new JSONObject(buffer.toString()).getJSONArray("results").getJSONObject(0).getString("artworkUrl100");
+              artURL = artURL.replace("100x100", "200x200");
+              Log.i(TAG, artURL);
+              final Bitmap b = getImageBitmap(artURL);
+              runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                  albumArt.setImageBitmap(b);
+                }
+              });
+            }
+          } catch (Exception e) {
+            Log.e(TAG, "Error", e);
+          }
+        }
+      };
+      Thread t = new Thread(getAlbumArt);
+      t.start();
     }
     private int readStream(InputStream stream, int i_len, OutputStream b) {
       int i_chunk = i_len;
@@ -238,14 +300,15 @@ public class MainActivity extends AppCompatActivity {
         }
         String s = new String(psz_meta, "UTF-8");
         if (s.indexOf("StreamTitle=") != -1) {
-          String meta = s.substring(s.indexOf("'") + 1,  s.indexOf("';"));
+          final String meta = s.substring(s.indexOf("'") + 1,  s.indexOf("';"));
           if (icy_title == null || !meta.equals(icy_title)) {
             Log.i("MyApp", meta);
             icy_title = meta;
-            txt.post(new Runnable() {
+            getAlbumArt(meta);
+            runOnUiThread(new Runnable() {
               @Override
               public void run() {
-                txt.setText(icy_title);
+                txt.setText(meta);
               }
             });
           }
