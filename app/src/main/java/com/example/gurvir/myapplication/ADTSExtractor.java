@@ -24,27 +24,34 @@ public class ADTSExtractor {
   }
 
   private void readADTSHeader() throws IOException {
-      if (hasReadHeader) return;
-      byte[] hdr = new byte[7];
-      int bytesRead = 0;
-      while (bytesRead < 7) {
-        bytesRead += this.inputStream.read(hdr, bytesRead, 7 - bytesRead);
+    if (hasReadHeader) return;
+
+    byte[] hdr = new byte[7];
+    int syncWord;
+
+    do {
+      hdr[0] = (byte) (this.inputStream.read() & 0xFF);
+      hdr[1] = (byte) (this.inputStream.read() & 0xFF);
+      syncWord = ((hdr[0] & 0xFF) << 4 | (hdr[1] & 0xFF) >> 4);
+    } while (syncWord != 0xFFF);
+
+    int bytesRead = 2;
+    while (bytesRead < 7) {
+      hdr[bytesRead] = (byte) (this.inputStream.read() & 0xFF);
+      bytesRead++;
+    }
+
+    this.protectionAbsent        =  hdr[1] & 0b1;
+    this.profile                 = (((hdr[2] & 0xFF) >> 6) & 0b11) + 1;
+    this.samplingFrequencyIndex  = ((hdr[2] & 0xFF) >> 2) & 0b1111;
+    this.channelConfiguration    = ((hdr[2] & 0b1) << 2) | ((hdr[3] & 0xFF) >> 6);
+    this.frameLength             = (((hdr[3] & 0b11) << 11) | ((hdr[4] & 0xFF) << 3) | ((hdr[5] & 0xFF) >> 5));
+    if (this.protectionAbsent == 0) {
+      while(bytesRead < 9) {
+        bytesRead += this.inputStream.skip(1);
       }
-      int syncWord = ((hdr[0] & 0xFF) << 4 | (hdr[1] & 0xFF) >> 4);
-      if (syncWord != 0xFFF) {
-        Log.i("MyApp", "ADTSExtractor error");
-      }
-      this.protectionAbsent        =  hdr[1] & 0b1;
-      this.profile                 = (((hdr[2] & 0xFF) >> 6) & 0b11) + 1;
-      this.samplingFrequencyIndex  = ((hdr[2] & 0xFF) >> 2) & 0b1111;
-      this.channelConfiguration    = ((hdr[2] & 0b1) << 2) | ((hdr[3] & 0xFF) >> 6);
-      this.frameLength             = (((hdr[3] & 0b11) << 11) | ((hdr[4] & 0xFF) << 3) | ((hdr[5] & 0xFF) >> 5));
-      if (this.protectionAbsent == 0) {
-        while(bytesRead < 9) {
-          bytesRead += this.inputStream.skip(1);
-        }
-      }
-      this.hasReadHeader = true;
+    }
+    this.hasReadHeader = true;
   }
   public int readSampleData(ByteBuffer buffer) throws IOException {
     if (!this.hasReadHeader) {

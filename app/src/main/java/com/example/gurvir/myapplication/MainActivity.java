@@ -1,11 +1,9 @@
 package com.example.gurvir.myapplication;
 
-import android.content.BroadcastReceiver;
-import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.os.Bundle;
 
+import android.support.v4.media.session.PlaybackStateCompat;
 import android.util.Log;
 import android.widget.ImageButton;
 import android.widget.ImageView;
@@ -19,7 +17,6 @@ public class MainActivity extends AppCompatActivity {
   private TextView txt;
   private ImageView albumArt;
   private ImageButton imageButton;
-  private boolean playingState;
 
 
   @Override
@@ -29,47 +26,31 @@ public class MainActivity extends AppCompatActivity {
     imageButton = findViewById(R.id.playButton);
     txt = findViewById(R.id.currentSong);
     albumArt = findViewById(R.id.albumArt);
-    playingState = false;
 
-    registerReceiver(new BroadcastReceiver() {
-      @Override
-      public void onReceive(Context context, Intent intent) {
-        String[] type = intent.getExtras().getStringArray("UPDATE_TYPE");
-        switch (type[0]) {
-          case "MEDIA_STATE":
-            updateMediaStateUI(type[1]);
-            break;
-          case "TEXT":
-            txt.setText(type[1]);
-            break;
-          case "ALBUM_ART":
-            albumArt.setImageBitmap(MediaPlayerService.getBitmap());
-            break;
-        }
-      }
-    }, new IntentFilter("ACTION_UPDATE_UI"));
+    DataCache.getInstance().getBitmap().observe(
+            this,
+            bitmap -> albumArt.setImageBitmap(bitmap)
+    );
+    DataCache.getInstance().getTrack().observe(
+            this,
+            track -> txt.setText(String.format("%s%s%s", track[0], System.lineSeparator(), track[1]))
+    );
+    DataCache.getInstance().getPlayingState().observe(
+            this,
+            state-> {
+              int img = state == PlaybackStateCompat.STATE_PLAYING ? R.drawable.ic_pause : R.drawable.ic_play;
+              imageButton.setImageResource(img);
+            }
+    );
 
     imageButton.setOnClickListener(v -> {
-      Log.i("MyApp", "Button Clicked");
-      if (!playingState) {
-        startService("PLAYING");
+//      Log.i("MyApp", "Button Clicked");
+      if (DataCache.getInstance().getPlayingState().getValue() != PlaybackStateCompat.STATE_PLAYING) {
+        startService(true);
       } else {
-        startService("PAUSED");
+        startService(false);
       }
     });
-  }
-
-  private void updateMediaStateUI(String state) {
-    switch (state) {
-      case "PLAYING":
-        imageButton.setImageResource(R.drawable.ic_baseline_pause_24);
-        playingState = true;
-        break;
-      case "PAUSED":
-        imageButton.setImageResource(R.drawable.ic_baseline_play_arrow_24);
-        playingState = false;
-        break;
-    }
   }
 
   private void stopService() {
@@ -77,7 +58,7 @@ public class MainActivity extends AppCompatActivity {
     stopService(serviceIntent);
   }
 
-  private void startService(String state) {
+  private void startService(boolean state) {
     Intent serviceIntent = new Intent(this, MediaPlayerService.class);
     serviceIntent.putExtra("MEDIA_STATE", state);
     startService(serviceIntent);

@@ -3,7 +3,6 @@ package com.example.gurvir.myapplication;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.app.Service;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -17,9 +16,16 @@ import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.os.Bundle;
 import android.os.Handler;
-import android.os.IBinder;
 import android.os.Looper;
+import android.support.v4.media.MediaBrowserCompat;
+import android.support.v4.media.MediaMetadataCompat;
+import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
+import android.text.TextUtils;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -39,57 +45,98 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.media.AudioAttributesCompat;
-import androidx.media.AudioFocusRequestCompat;
 import androidx.media.AudioManagerCompat;
+import androidx.media.MediaBrowserServiceCompat;
 
-public class MediaPlayerService extends Service {
+public class MediaPlayerService extends MediaBrowserServiceCompat {
   private final String TAG = "MyApp";
   private MediaNotification mediaNotification;
-  private boolean playingState;
   private Thread longRunningTask;
   private Thread playAudioThread;
   private ADTSExtractor adtsExtractor;
   private AudioTrack audioTrack;
   private MediaCodec codec;
   private MediaCodec.BufferInfo info;
-  private static Bitmap bitmap;
   private Handler mainHandler;
   private String icy_title;
-  private String icy_name;
   private AudioManager audioManager;
   private AudioFocusRequest focusRequest;
+  private MediaSessionCompat mediaSession;
+  private PlaybackStateCompat.Builder playbackStateBuilder;
+  private MediaMetadataCompat.Builder mediaMetadataBuilder;
+  private BroadcastReceiver broadcastReceiver;
+  private ConnectivityManager connectivityManager;
+  private ConnectivityManager.NetworkCallback networkCallback;
+  private int localPlaybackState;
+  private Network currentNetwork;
 
   @Override
   public void onCreate() {
     super.onCreate();
+    localPlaybackState = PlaybackStateCompat.STATE_NONE;
+    networkCallback =  new ConnectivityManager.NetworkCallback() {
+      @Override
+      public void onAvailable(@NonNull Network network) {
+        super.onAvailable(network);
+        currentNetwork = network;
+      }
+
+      @Override
+      public void onLost(@NonNull Network network) {
+        super.onLost(network);
+        currentNetwork = null;
+        mainHandler.postDelayed(() -> { if (currentNetwork == null) pauseMedia(); }, 10000);
+      }
+    };
+    connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+    connectivityManager.registerDefaultNetworkCallback(networkCallback);
     mainHandler = new Handler(Looper.getMainLooper());
-    playingState = false;
+    broadcastReceiver = new BroadcastReceiver() {
+      @Override
+      public void onReceive(Context context, Intent intent) {
+        if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
+          pauseMedia();
+        }
+      }
+    };
+    registerReceiver(broadcastReceiver, new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
+    playbackStateBuilder = new PlaybackStateCompat.Builder()
+            .setActions(PlaybackStateCompat.ACTION_PLAY_PAUSE | PlaybackStateCompat.ACTION_PAUSE | PlaybackStateCompat.ACTION_PLAY);
+    mediaMetadataBuilder = new MediaMetadataCompat.Builder()
+            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, -1);
+    mediaSession = new MediaSessionCompat(this, "tag");
+    mediaSession.setMetadata(mediaMetadataBuilder.build());
+    mediaSession.setCallback(new MediaSessionCompat.Callback() {
+      @Override
+      public void onPlay() {
+        super.onPlay();
+        playMedia();
+      }
+
+      @Override
+      public void onPause() {
+        super.onPause();
+        pauseMedia();
+      }
+
+    });
+    setPlaybackState(PlaybackStateCompat.STATE_NONE);
+    mediaSession.setActive(true);
+    setSessionToken(mediaSession.getSessionToken());
     NotificationChannel channel = new NotificationChannel(
             MediaNotification.CHANNEL_ID,
             "Radio Player",
-            NotificationManager.IMPORTANCE_HIGH
+            NotificationManager.IMPORTANCE_LOW
     );
     channel.setSound(null, null);
+    channel.setShowBadge(false);
     NotificationManager notificationManager = getSystemService(NotificationManager.class);
     notificationManager.createNotificationChannel(channel);
-    mediaNotification = new MediaNotification(this);
-
-    registerReceiver(new BroadcastReceiver() {
-      @Override
-      public void onReceive(Context context, Intent intent) {
-        if (playingState) {
-          pauseMedia();
-        } else {
-          playMedia();
-        }
-      }
-    }, new IntentFilter("NOTIFICATION_MEDIA_STATE_CHANGED"));
-
-    startService(new Intent(getBaseContext(), OnClearFromRecentService.class));
-
+    mediaNotification = new MediaNotification(this, mediaSession);
     adtsExtractor = new ADTSExtractor();
     AudioAttributes audioAttributes = new AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -121,51 +168,44 @@ public class MediaPlayerService extends Service {
             0
     );
   }
-
+  public void setPlaybackState(@Constants.PLAYBACK_STATE int state) {
+    localPlaybackState = state;
+    mediaSession.setPlaybackState(playbackStateBuilder.setState(state, 0, 1.0f).build());
+    DataCache.getInstance().setPlayingState(state);
+  }
   @Override
   public int onStartCommand(Intent intent, int flags, int startId) {
-    String action = intent.getExtras().getString("MEDIA_STATE");
-    switch (action) {
-      case "PLAYING":
-        playMedia();
-        break;
-      case "PAUSED":
-        pauseMedia();
-        break;
+    boolean shouldPlay = intent.getExtras().getBoolean("MEDIA_STATE");
+    if (shouldPlay) {
+      playMedia();
+    } else {
+      pauseMedia();
     }
     return START_NOT_STICKY;
   }
-  public void updateUI(String updateType, String data) {
-    Intent broadcastIntent = new Intent("ACTION_UPDATE_UI");
-    broadcastIntent.putExtra("UPDATE_TYPE", new String[] { updateType, data});
-    sendBroadcast(broadcastIntent);
-  }
-
-  public static Bitmap getBitmap() {
-    return bitmap;
-  }
   public void playMedia() {
-    if (!playingState && audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_GAIN) {
-      longRunningTask = new Thread(myLongRunningTask);
-      longRunningTask.start();
-      updateUI("MEDIA_STATE", "PLAYING");
-      Notification n = mediaNotification.updateNotification(this, true);
-      if (n != null) {
-        startForeground(1, n);
-      }
-      playingState = !playingState;
+    if (localPlaybackState != PlaybackStateCompat.STATE_PLAYING && longRunningTask == null && audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_GAIN) {
+        longRunningTask = new Thread(myLongRunningTask);
+        longRunningTask.start();
+        Notification n = mediaNotification.updateNotification(this, true);
+        if (n != null) {
+          startForeground(1, n);
+        }
+        setPlaybackState(PlaybackStateCompat.STATE_PLAYING);
     }
   }
   public void pauseMedia() {
-    if (playingState) {
-      longRunningTask.interrupt();
-      updateUI("MEDIA_STATE", "PAUSED");
+    if (localPlaybackState == PlaybackStateCompat.STATE_PLAYING) {
+      if (longRunningTask != null) {
+        longRunningTask.interrupt();
+      }
       Notification n = mediaNotification.updateNotification(this, false);
       if (n != null) {
         startForeground(1, n);
       }
       stopForeground(false);
-      playingState = !playingState;
+      audioManager.abandonAudioFocusRequest(focusRequest);
+      setPlaybackState(PlaybackStateCompat.STATE_PAUSED);
     }
   }
 
@@ -173,12 +213,44 @@ public class MediaPlayerService extends Service {
     private int icy_meta;
     private int offset;
     private int icy_offset;
+    private String icy_name;
+    private BufferedInputStream bufferedInputStream;
+    private HttpURLConnection urlConnection;
+    private Network cachedNetwork;
 
-    Runnable runnable = new Runnable() {
+    public void initializeConnection() throws IOException {
+      icy_meta = 0;
+      offset = 0;
+      icy_offset = 0;
+      icy_name = null;
+      cachedNetwork = currentNetwork;
+
+      String ampRadio = "https://newcap.leanstream.co/CKMPFM";
+      String virginRadio = "https://18583.live.streamtheworld.com/CIBKFMAAC_SC";
+      if (urlConnection != null) {
+        urlConnection.disconnect();
+      }
+      urlConnection = (HttpURLConnection) currentNetwork.openConnection(new URL(virginRadio));
+      urlConnection.setRequestProperty("Icy-Metadata", "1");
+      urlConnection.setRequestProperty("Accept-Encoding", "identity");
+      urlConnection.connect();
+
+      String headerField = urlConnection.getHeaderField("icy-metaint");
+      icy_meta =  headerField != null ? Integer.parseInt(headerField) : 0;
+      icy_offset = icy_meta;
+      icy_name = urlConnection.getHeaderField("icy-name");
+      if (icy_name != null && icy_name.trim().length() > 0) icy_name = null;
+      Log.i(TAG, "ICY_META: " + icy_meta);
+
+      if (bufferedInputStream != null) {
+        bufferedInputStream.close();
+      }
+      bufferedInputStream = new BufferedInputStream(urlConnection.getInputStream());
+    }
+
+    Runnable decodeAndWriteRunnable = new Runnable() {
       @Override
       public void run() {
-//        audioTrack.pause();
-//        audioTrack.setPlaybackHeadPosition(100);
         audioTrack.play();
 
         final long kTimeOutUs = 1000;
@@ -186,8 +258,7 @@ public class MediaPlayerService extends Service {
         boolean sawOutputEOS = false;
         int noOutputCounter = 0;
         int noOutputCounterLimit = 50;
-        boolean doStop = playAudioThread.isInterrupted();
-        while(!sawOutputEOS && noOutputCounter < noOutputCounterLimit && !doStop) {
+        while(!sawOutputEOS && noOutputCounter < noOutputCounterLimit && !playAudioThread.isInterrupted()) {
           noOutputCounter++;
           if (!sawInputEOS) {
             int inputBufIndex = codec.dequeueInputBuffer(kTimeOutUs);
@@ -197,10 +268,10 @@ public class MediaPlayerService extends Service {
               try {
                 sampleSize = adtsExtractor.readSampleData(inputBuffer);
               } catch (IOException e) {
-                Log.e(TAG, "Error", e);
+                Log.e(TAG, "READ SAMPLE DATA ERROR", e);
               }
               if (sampleSize < 0) {
-                Log.i("MyApp", "saw input eos");
+                Log.i(TAG, "saw input eos");
                 sawInputEOS = true;
                 sampleSize = 0;
               }
@@ -228,72 +299,78 @@ public class MediaPlayerService extends Service {
             }
             codec.releaseOutputBuffer(outputBufIndex, false);
             if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-              Log.i("MyApp", "saw output eos");
+              Log.i(TAG, "saw output eos");
               sawOutputEOS = true;
             }
           }
-          doStop = playAudioThread.isInterrupted();
         }
+        playAudioThread = null;
+        Log.i(TAG, "FINISHED 2");
       }
     };
-
     @Override
     public void run() {
-      icy_title = null;
-      icy_meta = 0;
-      offset = 0;
-      icy_offset = 0;
-      try {
-        String ampRadio = "https://newcap.leanstream.co/CKMPFM";
-        String virginRadio = "https://18583.live.streamtheworld.com/CIBKFMAAC_SC";
-        URL url = new URL(ampRadio);
-        HttpURLConnection urlConnection = (HttpURLConnection) url.openConnection();
-        urlConnection.setRequestProperty("Icy-Metadata", "1");
-        urlConnection.setRequestProperty("Accept-Encoding", "identity");
-        String headerField = urlConnection.getHeaderField("icy-metaint");
-        icy_meta = Integer.parseInt(headerField);
-        icy_offset = icy_meta;
-        icy_name = urlConnection.getHeaderField("icy-name");
-        if (icy_name.trim().length() > 0) icy_name = null;
-        Log.i("MyApp", Integer.toString(icy_meta));
-        try
-                (
-                  InputStream in = new BufferedInputStream((urlConnection.getInputStream()));
-                  PipedInputStream pipedInputStream = new PipedInputStream(icy_meta * 2);
-                  PipedOutputStream pipedOutputStream = new PipedOutputStream(pipedInputStream);
-                  AutoCloseable ignored = urlConnection::disconnect;
-                )
-        {
-          adtsExtractor.setDataSource(pipedInputStream);
-          readStream(in, icy_meta, pipedOutputStream);
-          mainHandler.postDelayed(() -> {
-            if (icy_title == null) {
-              updateUI("TEXT", icy_name == null ? "Unknown Artist - Unknown Song" : icy_name);
-              bitmap = BitmapFactory.decodeResource(getResources(), R.drawable.orange_music_icon);
-              String contentTitle = icy_name == null ? "Unknown Song" : icy_name;
-              String contentText = icy_name == null ? "Unknown Artist" : "Unknown Artist - Unknown Song";
-              Notification n = mediaNotification.createNotification(contentTitle, contentText, bitmap);
-              startForeground(1, n);
+        try {
+          initializeConnection();
+          try
+                  (
+                          PipedInputStream pipedInputStream = new PipedInputStream(32000);
+                          PipedOutputStream pipedOutputStream = new PipedOutputStream(pipedInputStream)
+                  )
+          {
+            readStream(bufferedInputStream, icy_meta, pipedOutputStream);
+            mainHandler.postDelayed(() -> {
+              if (icy_title == null && localPlaybackState == PlaybackStateCompat.STATE_PLAYING) {
+                Bitmap bitmap = BitmapFactory.decodeResource(getResources(), R.drawable.orange_music_icon);
+                DataCache.getInstance().setBitmap(bitmap);
+                String contentTitle = icy_name == null ? "Unknown Song" : icy_name;
+                String contentText = icy_name == null ? "Unknown Artist" : "Unknown Artist - Unknown Song";
+                DataCache.getInstance().setTrack(new String[] {contentTitle, contentText});
+                startForeground(1, mediaNotification.createNotification(contentTitle, contentText, bitmap));
+                mediaSession.setMetadata(
+                        mediaMetadataBuilder
+                                .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
+                                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, contentTitle)
+                                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, contentText)
+                                .build());
+              }
+            }, 500);
+            adtsExtractor.setDataSource(pipedInputStream);
+            MediaFormat format = adtsExtractor.getTrackFormat();
+            codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME));
+            codec.configure(format, null, null, 0);
+            codec.start();
+            info = new MediaCodec.BufferInfo();
+            if (playAudioThread == null) {
+              playAudioThread = new Thread(decodeAndWriteRunnable);
+              playAudioThread.start();
             }
-          }, 500);
-          MediaFormat format = adtsExtractor.getTrackFormat();
-          String mime = format.getString(MediaFormat.KEY_MIME);
-          codec = MediaCodec.createDecoderByType(mime);
-          codec.configure(format, null, null, 0);
-          codec.start();
-          info = new MediaCodec.BufferInfo();
-          playAudioThread = new Thread(runnable);
-          playAudioThread.start();
-          while(!longRunningTask.isInterrupted()) {
-            readStream(in, icy_meta, pipedOutputStream);
+            while(!longRunningTask.isInterrupted()) {
+              if (cachedNetwork == currentNetwork) {
+                // if network we're using is same as the one the system is using
+                readStream(bufferedInputStream, icy_meta, pipedOutputStream);
+              } else if (currentNetwork != null) {
+                // else if we've switched networks
+                initializeConnection();
+              }
+            }
+          } finally {
+            urlConnection.disconnect();
+            bufferedInputStream.close();
+          }
+        } catch (Exception e) {
+          if (e.getClass() != InterruptedIOException.class) {
+            Log.e(TAG, e.getClass().toString(), e);
           }
         } finally {
-          playAudioThread.interrupt();
-          Log.i("MyApp", "Finished");
+          Log.i(TAG, "FINISHED 1");
+          longRunningTask = null;
+          if (playAudioThread != null) {
+            playAudioThread.interrupt();
+          } else {
+            Log.i(TAG, "FINISHED 2");
+          }
         }
-      } catch (Exception e) {
-        Log.e("MyApp", "error", e);
-      }
     }
     private Bitmap getImageBitmap(String url) {
       Bitmap bm = null;
@@ -319,29 +396,53 @@ public class MediaPlayerService extends Service {
         @Override
         public void run() {
           try {
-            getArt(str);
+            int i;
+            if ((i = str.indexOf(" & ")) > -1) {
+              test(str.split(" - "), i);
+            } else {
+              getArt(str);
+            }
           } catch (AlbumArtNotFoundException e) {
             try {
               int i;
+              String[] parts = str.split(" - ");
               if ((i = str.indexOf(" FT ")) > -1) {
-                getArt(str.substring(0, i));
+                test(parts, i);
               } else if ((i = str.indexOf(" FEAT ")) > -1) {
-                getArt(str.substring(0, i));
+                test(parts, i);
+              }  else if (str.indexOf(" & ") > -1) {
+                getArt(str);
+              } else {
+                throw e;
               }
             } catch (AlbumArtNotFoundException e2) {
-              bitmap = BitmapFactory.decodeResource(getResources(), R.drawable.orange_music_icon);
-              updateUI("ALBUM_ART", "");
-              mainHandler.post(() -> {
-                Notification notification = mediaNotification.createNotification(str, bitmap);
-                startForeground(1, notification);
-              });
+              Bitmap bitmap = BitmapFactory.decodeResource(getResources(), R.drawable.orange_music_icon);
+              DataCache.getInstance().setBitmap(bitmap);
+              String[] parts = str.split(" - ");
+              mediaSession.setMetadata(
+                      mediaMetadataBuilder
+                              .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
+                              .putString(MediaMetadataCompat.METADATA_KEY_TITLE, parts[0])
+                              .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, parts[1])
+                              .build());
+              DataCache.getInstance().setTrack(parts);
+              mainHandler.post(() -> startForeground(1, mediaNotification.createNotification(parts[0], parts[1], bitmap)));
             }
+          }
+        }
+        public void test(String[] parts, int i) throws AlbumArtNotFoundException {
+          int splitIndex = parts[0].length() + 2;
+          if (i > splitIndex) {
+            getArt(str.substring(0, i));
+          } else {
+            // i < splitIndex
+            getArt(parts[0].substring(0 , i) + " - " + parts[1]);
           }
         }
         public void getArt(String searchTerm) throws AlbumArtNotFoundException {
           try {
             URL url = new URL(String.format("https://itunes.apple.com/search?term=%s&limit=1", URLEncoder.encode(searchTerm, "UTF-8")));
-            Log.i("MyApp", "iTunes Query URL: " + url.toString());
+            Log.i(TAG, "iTunes Query URL: " + url.toString());
             HttpURLConnection connection = (HttpURLConnection) url.openConnection();
             try(
                     AutoCloseable ignored = connection::disconnect;
@@ -356,16 +457,21 @@ public class MediaPlayerService extends Service {
               }
               JSONArray results =  new JSONObject(sb.toString()).getJSONArray("results");
               if (results.length() > 0) {
-                String artURL = results.getJSONObject(0).getString("artworkUrl100").replace("100x100", "200x200");
+                String artURL = results.getJSONObject(0).getString("artworkUrl100").replace("100x100", "320x320");
                 Log.i(TAG, artURL);
-                bitmap = getImageBitmap(artURL);
-                updateUI("ALBUM_ART", "");
-                mainHandler.post(() -> {
-                  Notification notification = mediaNotification.createNotification(str, bitmap);
-                  startForeground(1, notification);
-                });
+                Bitmap bitmap = getImageBitmap(artURL);
+                DataCache.getInstance().setBitmap(bitmap);
+                String[] parts = str.split(" - ");
+                mediaSession.setMetadata(
+                        mediaMetadataBuilder
+                                .putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
+                                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, parts[0])
+                                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, parts[1])
+                                .build());
+                DataCache.getInstance().setTrack(parts);
+                mainHandler.post(() -> startForeground(1, mediaNotification.createNotification(parts[0], parts[1], bitmap)));
               } else {
-                Log.i("MyApp", "0 results found");
+                Log.i(TAG, "0 results found");
                 throw new AlbumArtNotFoundException();
               }
             }
@@ -381,7 +487,7 @@ public class MediaPlayerService extends Service {
       Thread t = new Thread(getAlbumArt);
       t.start();
     }
-    private void readStream(InputStream stream, int i_len, OutputStream b) {
+    private void readStream(InputStream inputStream, int i_len, OutputStream outputStream) {
       int i_chunk = i_len;
       if (icy_meta > 0) {
         if (Integer.MAX_VALUE - i_chunk < offset)
@@ -393,14 +499,16 @@ public class MediaPlayerService extends Service {
       int i_read;
       try {
         byte[] buffer = new byte[i_chunk];
-        i_read = stream.read(buffer,0 , i_chunk);
+        i_read = inputStream.read(buffer,0 , i_chunk);
         if (i_read < 0) return;
-        b.write(buffer, 0, i_read);
+        outputStream.write(buffer, 0, i_read);
         offset += i_read;
         if (icy_meta > 0 && offset == icy_offset) {
-          if (readICYMeta(stream) != 0) return;
+          if (readICYMeta(inputStream) != 0) return;
           icy_offset = offset + icy_meta;
         }
+      } catch (IOException e) {
+        mainHandler.post(() -> pauseMedia());
       } catch (Exception e) {
         if (e.getClass() != InterruptedIOException.class) {
           Log.e(TAG, "error", e);
@@ -429,10 +537,9 @@ public class MediaPlayerService extends Service {
         if (s.contains("StreamTitle=")) {
           final String meta = s.substring(s.indexOf("'") + 1,  s.indexOf("';")).replace("*", "");
           if (!meta.equals(icy_title)) {
-            Log.i("MyApp", meta);
+            Log.i(TAG, meta);
             icy_title = meta;
             getAlbumArt(meta);
-            updateUI("TEXT", meta);
           }
         }
         return 0;
@@ -446,10 +553,20 @@ public class MediaPlayerService extends Service {
   @Override
   public void onDestroy() {
     super.onDestroy();
+    unregisterReceiver(broadcastReceiver);
+    connectivityManager.unregisterNetworkCallback(networkCallback);
   }
+
   @Nullable
   @Override
-  public IBinder onBind(Intent intent) {
-    return null;
+  public BrowserRoot onGetRoot(@NonNull String s, int i, @Nullable Bundle bundle) {
+    return new BrowserRoot("MY_EMPTY_MEDIA_ROOT_ID", null);
+  }
+
+  @Override
+  public void onLoadChildren(@NonNull String parentId, @NonNull Result<List<MediaBrowserCompat.MediaItem>> result) {
+    if (TextUtils.equals("MY_EMPTY_MEDIA_ROOT_ID", parentId)) {
+      result.sendResult(null);
+    }
   }
 }
