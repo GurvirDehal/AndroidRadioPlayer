@@ -230,7 +230,7 @@ public class MediaPlayerService extends MediaBrowserServiceCompat {
       if (urlConnection != null) {
         urlConnection.disconnect();
       }
-      urlConnection = (HttpURLConnection) currentNetwork.openConnection(new URL(virginRadio));
+      urlConnection = (HttpURLConnection) currentNetwork.openConnection(new URL(ampRadio));
       urlConnection.setRequestProperty("Icy-Metadata", "1");
       urlConnection.setRequestProperty("Accept-Encoding", "identity");
       urlConnection.connect();

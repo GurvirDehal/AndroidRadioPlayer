@@ -5,6 +5,7 @@ android {
     defaultConfig {
         applicationId "com.example.gurvir.myapplication"
         minSdkVersion 26
+        //noinspection ExpiredTargetSdkVersion
         targetSdkVersion 29
         versionCode 1
         versionName "1.0"
