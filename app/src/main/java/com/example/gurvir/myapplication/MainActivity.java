@@ -44,10 +44,12 @@ public class MainActivity extends AppCompatActivity {
     );
 
     imageButton.setOnClickListener(v -> {
-//      Log.i("MyApp", "Button Clicked");
+      Log.i("MyApp", "Button Clicked");
       if (DataCache.getInstance().getPlayingState().getValue() != PlaybackStateCompat.STATE_PLAYING) {
+        Log.i(TAG, "Start service in playing state");
         startService(true);
       } else {
+        Log.i(TAG, "start service in paused state");
         startService(false);
       }
     });
